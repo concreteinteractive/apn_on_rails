@@ -1,6 +1,6 @@
-# Represents the message you wish to send. 
+# Represents the message you wish to send.
 # An APN::Notification belongs to an APN::Device.
-# 
+#
 # Example:
 #   apn = APN::Notification.new
 #   apn.badge = 5
@@ -8,10 +8,10 @@
 #   apn.alert = 'Hello!'
 #   apn.device = APN::Device.find(1)
 #   apn.save
-# 
+#
 # To deliver call the following method:
 #   APN::Notification.send_notifications
-# 
+#
 # As each APN::Notification is sent the <tt>sent_at</tt> column will be timestamped,
 # so as to not be sent again.
 class APN::Notification < APN::Base
@@ -22,7 +22,7 @@ class APN::Notification < APN::Base
   belongs_to :device, :class_name => 'APN::Device'
 
   # Stores the text alert message you want to send to the device.
-  # 
+  #
   # If the message is over 150 characters long it will get truncated
   # to 150 characters with a <tt>...</tt>
   def alert=(message)
@@ -33,7 +33,9 @@ class APN::Notification < APN::Base
   end
 
   # Creates a Hash that will be the payload of an APN.
-  # 
+  #
+  # Reduces the length of the alert string by reduce_alert_by_length.
+  #
   # Example:
   #   apn = APN::Notification.new
   #   apn.badge = 5
@@ -41,16 +43,24 @@ class APN::Notification < APN::Base
   #   apn.alert = 'Hello!'
   #   apn.apple_hash # => {"aps" => {"badge" => 5, "sound" => "my_sound.aiff", "alert" => "Hello!"}}
   #
-  # Example 2: 
+  # Example 2:
   #   apn = APN::Notification.new
   #   apn.badge = 0
   #   apn.sound = true
   #   apn.custom_properties = {"typ" => 1}
   #   apn.apple_hast # => {"aps" => {"badge" => 0}}
-  def apple_hash
+  def apple_hash(reduce_alert_by_length=0)
     result = {}
     result['aps'] = {}
-    result['aps']['alert'] = self.alert if self.alert
+    if self.alert
+      if reduce_alert_by_length > 0
+        encoded_alert = self.alert.force_encoding("UTF-8")
+        new_size = encoded_alert.length - reduce_alert_by_length
+        result['aps']['alert'] = encoded_alert[0,new_size]
+      else
+        result['aps']['alert'] = self.alert
+      end
+    end
     result['aps']['badge'] = self.badge.to_i if self.badge
     if self.sound
       result['aps']['sound'] = self.sound if self.sound.is_a? String
@@ -64,8 +74,14 @@ class APN::Notification < APN::Base
     result
   end
 
+  def encode_binary_message(json)
+    message1 = "\0\0 #{self.device.to_hexa}".force_encoding("UTF-8")
+    message2 = "\0#{json.length.chr}#{json}".force_encoding("UTF-8")
+    return message1+message2
+  end
+
   # Creates the JSON string required for an APN message.
-  # 
+  #
   # Example:
   #   apn = APN::Notification.new
   #   apn.badge = 5
@@ -77,10 +93,15 @@ class APN::Notification < APN::Base
   end
 
   # Creates the binary message needed to send to Apple.
+  # If the message is too long, reduces the alert part of the message by the overage.
   def message_for_sending
-    json = self.to_apple_json
-    message = "\0\0 #{self.device.to_hexa}\0#{json.length.chr}#{json}"
-    raise APN::Errors::ExceededMessageSizeError.new(message) if message.size.to_i > 256
+    json = self.apple_hash.to_json
+    message = encode_binary_message json
+    size = message.size.to_i
+    if size > 256
+      json = self.apple_hash(size-256).to_json
+      message = encode_binary_message(json)
+    end
     message
   end
 
@@ -88,14 +109,14 @@ class APN::Notification < APN::Base
 
     # Opens a connection to the Apple APN server and attempts to batch deliver
     # an Array of notifications.
-    # 
+    #
     # This method expects an Array of APN::Notifications. If no parameter is passed
     # in then it will use the following:
     #   APN::Notification.all(:conditions => {:sent_at => nil})
-    # 
+    #
     # As each APN::Notification is sent the <tt>sent_at</tt> column will be timestamped,
     # so as to not be sent again.
-    # 
+    #
     # This can be run from the following Rake task:
     #   $ rake apn:notifications:deliver
     def send_notifications(notifications = APN::Notification.all(:conditions => {:sent_at => nil}))
